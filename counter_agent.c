@@ -19,43 +19,48 @@
 #include <linux/list.h>
 
 #define PROCFS_NAME "udp_tcp_counter"
-#define PROCFS_MAX_SIZE     1024
+#define PROCFS_MAX_SIZE 1024
 
 char procfs_buffer[PROCFS_MAX_SIZE];
 struct proc_dir_entry *proc_file;
 
-
 // int co_ifindex;
 static struct nf_hook_ops nfho;
 static char *co_dev_name = "eth0";
-static u_int64_t syn_counter;
-static u_int64_t udp_counter;
-static u_int64_t udp_size_counter;
+static u_int64_t tcp_counter;
+static u_int64_t tcp_syn_counter;
+static u_int64_t udp_packets_counter;
+static u_int64_t udp_packets_counter_53;
+static u_int64_t udp_throughtput_counter;
+static u_int64_t udp_throughtput_counter_53;
 
-// todo: togliere parametri 
+// todo: togliere parametri
 module_param(co_dev_name, charp, 0000);
 MODULE_PARM_DESC(co_dev_name, "Name of the interface connected to the CO");
 
-static ssize_t procfile_read(struct file *file, char __user *ubuf,size_t count, loff_t *ppos);
+static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos);
 unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_state *state);
 
-static struct file_operations myops = 
-{
-	.owner = THIS_MODULE,
-	.read = procfile_read,
+static struct file_operations myops =
+	{
+		.owner = THIS_MODULE,
+		.read = procfile_read,
 };
 
-static ssize_t procfile_read(struct file *file, char __user *ubuf,size_t count, loff_t *ppos) 
+static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
 	char buf[PROCFS_MAX_SIZE];
-	int len=0;
-	if(*ppos > 0 || count < PROCFS_MAX_SIZE)
+	int len = 0;
+	if (*ppos > 0 || count < PROCFS_MAX_SIZE)
 		return 0;
-	len += sprintf(buf,"tcp_syn = %llu\n", syn_counter);
-	len += sprintf(buf + len,"udp_packets = %llu\n", udp_counter);
-	len += sprintf(buf + len,"udp_throughtput = %llu\n", udp_size_counter);
-	
-	if(copy_to_user(ubuf,buf,len))
+	len += sprintf(buf, "tcp_packets = %llu\n", tcp_counter);
+	len += sprintf(buf + len, "tcp_syn_packets = %llu\n", tcp_syn_counter);
+	len += sprintf(buf + len, "udp_packets = %llu\n", udp_packets_counter);
+	len += sprintf(buf + len, "udp_throughtput = %llu\n", udp_throughtput_counter);
+	len += sprintf(buf + len, "udp_packets_53 = %llu\n", udp_packets_counter_53);
+	len += sprintf(buf + len, "udp_throughtput_53 = %llu\n", udp_throughtput_counter_53);
+
+	if (copy_to_user(ubuf, buf, len))
 		return -EFAULT;
 	*ppos = len;
 	return len;
@@ -64,16 +69,20 @@ static ssize_t procfile_read(struct file *file, char __user *ubuf,size_t count, 
 int __init init_module(void)
 {
 	int result;
-	syn_counter = 0;
-	udp_size_counter = 0;
-	udp_counter = 0;
+	tcp_counter = 0;
+	tcp_syn_counter = 0;
+	udp_packets_counter = 0;
+	udp_packets_counter_53 = 0;
+	udp_throughtput_counter = 0;
+	udp_throughtput_counter_53 = 0;
 
-    proc_file = proc_create(PROCFS_NAME, 0644, NULL, &myops);
-    if (proc_file == NULL){
-        proc_remove(proc_file);
-        printk(KERN_ALERT "Error: couldn't create proc file");
-        return -ENOMEM;
-    }
+	proc_file = proc_create(PROCFS_NAME, 0644, NULL, &myops);
+	if (proc_file == NULL)
+	{
+		proc_remove(proc_file);
+		printk(KERN_ALERT "Error: couldn't create proc file");
+		return -ENOMEM;
+	}
 
 	nfho.hook = (nf_hookfn *)hook_func; //function to call when conditions are met
 
@@ -98,7 +107,7 @@ int __init init_module(void)
 void __exit cleanup_module(void)
 {
 	nf_unregister_net_hook(&init_net, &nfho);
-	remove_proc_entry(PROCFS_NAME, proc_file);
+	proc_remove(proc_file);
 	printk(KERN_INFO "IFACE_TRACK: cleanup_module() called\n");
 }
 
@@ -106,6 +115,7 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
+	struct udphdr *udph;
 	if (skb)
 	{
 		// todo: non so bene cosa faccia
@@ -120,10 +130,28 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 				tcph = tcp_hdr(skb);
 				if (!tcph)
 					return NF_ACCEPT;
+				tcp_counter++;
+
 				if (tcph->syn)
 				{
-					syn_counter++;
-					printk("Syn counter %llu \n", syn_counter);
+					tcp_syn_counter++;
+					// printk("Syn counter %llu \n", syn_counter);
+				}
+			}
+			// controllo che il protocollo sopra ip sia udp
+			if (iph->protocol == IPPROTO_UDP)
+			{
+				udph = udp_hdr(skb);
+				if (!udph)
+					return NF_ACCEPT;
+				// incremento i contatori generici
+				udp_packets_counter++;
+				udp_throughtput_counter += skb->len;
+
+				if (ntohs(udph->source) == 53)
+				{
+					udp_packets_counter_53++;
+					udp_throughtput_counter_53 += skb->len;
 				}
 			}
 		}
@@ -135,6 +163,5 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 
 	return NF_ACCEPT;
 }
-
 
 MODULE_LICENSE("GPL");
