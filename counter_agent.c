@@ -27,12 +27,27 @@ struct proc_dir_entry *proc_file;
 // int co_ifindex;
 static struct nf_hook_ops nfho;
 static char *co_dev_name = "eth0";
+
+// elenco di contatori => todo fare una struct
 static u_int64_t tcp_counter;
 static u_int64_t tcp_syn_counter;
 static u_int64_t udp_packets_counter;
 static u_int64_t udp_packets_counter_53;
 static u_int64_t udp_throughtput_counter;
 static u_int64_t udp_throughtput_counter_53;
+
+// mappa per la gestione dei server da proteggere
+// todo: usare network order o host order?
+typedef struct
+{
+	__be16 port;
+	__be32 ip;
+	uint64_t counter;
+	uint64_t syn_counter;
+
+} server_ip_port;
+unsigned servers_size = 2;
+server_ip_port servers[2];
 
 // todo: togliere parametri
 module_param(co_dev_name, charp, 0000);
@@ -49,16 +64,31 @@ static struct file_operations myops =
 
 static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
+	int i;
 	char buf[PROCFS_MAX_SIZE];
 	int len = 0;
+	unsigned char bytes[4];
 	if (*ppos > 0 || count < PROCFS_MAX_SIZE)
 		return 0;
-	len += sprintf(buf, "tcp_packets = %llu\n", tcp_counter);
-	len += sprintf(buf + len, "tcp_syn_packets = %llu\n", tcp_syn_counter);
-	len += sprintf(buf + len, "udp_packets = %llu\n", udp_packets_counter);
-	len += sprintf(buf + len, "udp_throughtput = %llu\n", udp_throughtput_counter);
-	len += sprintf(buf + len, "udp_packets_53 = %llu\n", udp_packets_counter_53);
-	len += sprintf(buf + len, "udp_throughtput_53 = %llu\n", udp_throughtput_counter_53);
+	len += sprintf(buf, "{\n");
+	len += sprintf(buf + len, "\"tcp_packets\": %llu,\n", tcp_counter);
+	len += sprintf(buf + len, "\"tcp_syn_packets\": %llu,\n", tcp_syn_counter);
+	len += sprintf(buf + len, "\"udp_packets\": %llu,\n", udp_packets_counter);
+	len += sprintf(buf + len, "\"udp_throughtput\": %llu,\n", udp_throughtput_counter);
+	len += sprintf(buf + len, "\"udp_packets_53\": %llu,\n", udp_packets_counter_53);
+	len += sprintf(buf + len, "\"udp_throughtput_53\": %llu,\n", udp_throughtput_counter_53);
+	for (i = 0; i < servers_size; i++)
+	{
+		bytes[0] = servers[i].ip & 0xFF;
+		bytes[1] = (servers[i].ip >> 8) & 0xFF;
+		bytes[2] = (servers[i].ip >> 16) & 0xFF;
+		bytes[3] = (servers[i].ip >> 24) & 0xFF;
+		len += sprintf(buf + len, "\"tcp_packets_%d.%d.%d.%d_%d\": %llu,\n",
+					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].counter);
+		len += sprintf(buf + len, "\"tcp_syn_packets_%d.%d.%d.%d_%d\": %llu,\n",
+					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].syn_counter);
+	}
+	len += sprintf(buf + len - 2, "\n}\n");
 
 	if (copy_to_user(ubuf, buf, len))
 		return -EFAULT;
@@ -76,6 +106,11 @@ int __init init_module(void)
 	udp_throughtput_counter = 0;
 	udp_throughtput_counter_53 = 0;
 
+	servers[0].port = htons(80);
+	servers[0].ip = htonl(3232235831); // 192.168.1.55
+	servers[1].port = htons(8096);
+	servers[1].ip = htonl(3232235831); // 192.168.1.55
+
 	proc_file = proc_create(PROCFS_NAME, 0644, NULL, &myops);
 	if (proc_file == NULL)
 	{
@@ -85,9 +120,7 @@ int __init init_module(void)
 	}
 
 	nfho.hook = (nf_hookfn *)hook_func; //function to call when conditions are met
-
 	nfho.hooknum = NF_INET_PRE_ROUTING;
-
 	nfho.pf = PF_INET; //IPV4 packets
 	nfho.priority = NF_IP_PRI_FILTER;
 
@@ -113,6 +146,7 @@ void __exit cleanup_module(void)
 
 unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
 {
+	int i;
 	struct iphdr *iph;
 	struct tcphdr *tcph;
 	struct udphdr *udph;
@@ -135,7 +169,18 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 				if (tcph->syn)
 				{
 					tcp_syn_counter++;
-					// printk("Syn counter %llu \n", syn_counter);
+				}
+				for (i = 0; i < servers_size; i++)
+				{
+					if (tcph->dest == servers[i].port && iph->daddr == servers[i].ip)
+					{
+						servers[i].counter++;
+						if (tcph->syn)
+						{
+							servers[i].syn_counter++;
+						}
+						break;
+					}
 				}
 			}
 			// controllo che il protocollo sopra ip sia udp
@@ -148,6 +193,7 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 				udp_packets_counter++;
 				udp_throughtput_counter += skb->len;
 
+				// verifico che la porta sorgente sia la 53 (DNS)
 				if (ntohs(udph->source) == 53)
 				{
 					udp_packets_counter_53++;
