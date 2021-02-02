@@ -11,6 +11,10 @@ Modificare nel Makefile la variabile `LINUX_SRC` -> Percorso della cartella con 
 3. Accedere nella cartella `{cartella_modulo}` sul router
 4. `insmod counter_agent.ko`
 5. Per rimuovere il modulo `rmmod counter_agent.ko`
+6. Per impostare l'auto avvio
+  1. `cp counter_agent.ko /lib/modules/4.14.98-tgr/kernel/drivers/`
+  2. `echo 'counter_agent' | tee -a /etc/modules`
+  3. `depmod`
 
 ## Utilizzo
 
