@@ -21,8 +21,8 @@ typedef struct
 	u_int64_t tcp_syn_counter;
 	u_int64_t udp_packets_counter;
 	u_int64_t udp_packets_counter_53;
-	u_int64_t udp_throughtput_counter;
-	u_int64_t udp_throughtput_counter_53;
+	u_int64_t udp_throughput_counter;
+	u_int64_t udp_throughput_counter_53;
 } packets_counter;
 static packets_counter counter;
 
@@ -59,24 +59,26 @@ static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count,
 	unsigned char bytes[4];
 	if (*ppos > 0 || count < PROCFS_MAX_SIZE)
 		return 0;
-	len += sprintf(buf + len, "tcp_packets %llu\n", counter.tcp_counter);
-	len += sprintf(buf + len, "tcp_syn_packets %llu\n", counter.tcp_syn_counter);
-	len += sprintf(buf + len, "udp_packets %llu\n", counter.udp_packets_counter);
-	len += sprintf(buf + len, "udp_throughtput %llu,\n", counter.udp_throughtput_counter);
-	len += sprintf(buf + len, "udp_packets_53 %llu\n", counter.udp_packets_counter_53);
-	len += sprintf(buf + len, "udp_throughtput_53 %llu\n", counter.udp_throughtput_counter_53);
+	len += sprintf(buf + len, "{\n");
+	len += sprintf(buf + len, "  \"tcp_packets\": %llu,\n", counter.tcp_counter);
+	len += sprintf(buf + len, "  \"tcp_syn_packets\": %llu,\n", counter.tcp_syn_counter);
+	len += sprintf(buf + len, "  \"udp_packets\": %llu,\n", counter.udp_packets_counter);
+	len += sprintf(buf + len, "  \"udp_throughput\": %llu,\n", counter.udp_throughput_counter);
+	len += sprintf(buf + len, "  \"udp_packets_53\": %llu,\n", counter.udp_packets_counter_53);
+	len += sprintf(buf + len, "  \"udp_throughput_53\": %llu,\n", counter.udp_throughput_counter_53);
 	for (i = 0; i < servers_size; i++)
 	{
 		bytes[0] = servers[i].ip & 0xFF;
 		bytes[1] = (servers[i].ip >> 8) & 0xFF;
 		bytes[2] = (servers[i].ip >> 16) & 0xFF;
 		bytes[3] = (servers[i].ip >> 24) & 0xFF;
-		len += sprintf(buf + len, "tcp_packets_%d.%d.%d.%d:%d %llu\n",
+		len += sprintf(buf + len, "  \"tcp_packets_%d.%d.%d.%d:%d\": %llu,\n",
 					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].counter);
-		len += sprintf(buf + len, "tcp_syn_packets_%d.%d.%d.%d:%d %llu\n",
+		len += sprintf(buf + len, "  \"tcp_syn_packets_%d.%d.%d.%d:%d\": %llu,\n",
 					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].syn_counter);
 	}
-
+	len -= 2;
+	len += sprintf(buf + len, "\n}\n");
 	if (copy_to_user(ubuf, buf, len))
 		return -EFAULT;
 	*ppos = len;
@@ -93,10 +95,15 @@ static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t
 	char delim[] = "\n";
 	char *token, *cur;
 
-	if (*ppos > 0 || count > PROCFS_MAX_SIZE)
+	if (*ppos > 0 || count > PROCFS_MAX_SIZE){
+		printk("Count > PROCFS_MAX_SIZE o pps > 0");
 		return -EFAULT;
-	if (copy_from_user(buf, ubuf, count))
+	}
+	if (copy_from_user(buf, ubuf, count)){
+		printk("Copy buffer error");
 		return -EFAULT;
+
+	}
 
 	c = strlen(buf);
 
@@ -124,19 +131,19 @@ static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t
 	i = 0;
 	token = buf;
 	cur = buf;
-	printk("---- %d - %p", servers_size, buf);
+	// printk("---- %d - %p", servers_size, buf);
 	while ((token = strsep(&cur, delim)) != NULL)
 	{
 		num = sscanf(token, "%hhd.%hhd.%hhd.%hhd %hd",
 					 &bytes[0], &bytes[1], &bytes[2], &bytes[3], &(servers[i].port));
-		// printk("%s fine_riga___ %p\n", token, token);
+		printk("%s %d fine_riga___ %p\n", token, num, token);
 		// printk("num %d", num);
-		if (num != 5)
-			return c;
-		servers[i].port = htons(servers[i].port);
-		servers[i].ip = *(unsigned int *)bytes;
-		servers[i].counter = 0;
-		servers[i].syn_counter = 0;
+		if (num == 5){
+			servers[i].port = htons(servers[i].port);
+			servers[i].ip = *(unsigned int *)bytes;
+			servers[i].counter = 0;
+			servers[i].syn_counter = 0;
+		}
 		i++;
 	}
 
@@ -147,12 +154,14 @@ static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t
 int __init init_module(void)
 {
 	int result;
+	struct net_device *dev;
+
 	counter.tcp_counter = 0;
 	counter.tcp_syn_counter = 0;
 	counter.udp_packets_counter = 0;
 	counter.udp_packets_counter_53 = 0;
-	counter.udp_throughtput_counter = 0;
-	counter.udp_throughtput_counter_53 = 0;
+	counter.udp_throughput_counter = 0;
+	counter.udp_throughput_counter_53 = 0;
 
 	proc_file = proc_create(PROCFS_NAME, 0644, NULL, &myops);
 	if (proc_file == NULL)
@@ -162,8 +171,19 @@ int __init init_module(void)
 		return -ENOMEM;
 	}
 
+	// imposto l'hook per ascoltare il traffico in uscita
+	// sull'interfaccia eth0 (quella verso la wan)
+    dev = dev_get_by_name(&init_net, "eth0");
+
+    if(!dev)
+    {
+	printk(KERN_ERR "tcp/udp packet counter: error net device missing!\n");
+        return -1;
+    }
+
+	nfho.dev = dev;
 	nfho.hook = (nf_hookfn *)hook_func; //function to call when conditions are met
-	nfho.hooknum = NF_INET_PRE_ROUTING;
+	nfho.hooknum = NF_INET_POST_ROUTING;
 	nfho.pf = PF_INET; //IPV4 packets
 	nfho.priority = NF_IP_PRI_FILTER;
 
@@ -236,13 +256,13 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 					return NF_ACCEPT;
 				// incremento i contatori generici
 				counter.udp_packets_counter++;
-				counter.udp_throughtput_counter += skb->len;
+				counter.udp_throughput_counter += skb->len;
 
 				// verifico che la porta sorgente sia la 53 (DNS)
 				if (ntohs(udph->source) == 53)
 				{
 					counter.udp_packets_counter_53++;
-					counter.udp_throughtput_counter_53 += skb->len;
+					counter.udp_throughput_counter_53 += skb->len;
 				}
 			}
 		}
