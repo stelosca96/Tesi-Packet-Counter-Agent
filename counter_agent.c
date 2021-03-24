@@ -14,30 +14,15 @@ struct proc_dir_entry *proc_file;
 
 static struct nf_hook_ops nfho;
 
-// elenco di contatori => todo fare una struct
+// elenco di contatori =>
+// e uso il fast path posso solo contare il primo pacchetto del flusso
+// quindi conto i syn, in futuro lo espanderò con altre metriche
 typedef struct
 {
-	u_int64_t tcp_counter;
 	u_int64_t tcp_syn_counter;
-	u_int64_t udp_packets_counter;
-	u_int64_t udp_packets_counter_53;
-	u_int64_t udp_throughput_counter;
-	u_int64_t udp_throughput_counter_53;
 } packets_counter;
 static packets_counter counter;
 
-// vettore per la gestione dei server da proteggere
-typedef struct
-{
-	__be16 port;
-	__be32 ip;
-	uint64_t counter;
-	uint64_t syn_counter;
-
-} server_ip_port;
-
-unsigned servers_size = 0;
-server_ip_port *servers;
 
 static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos);
 static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos);
@@ -53,30 +38,12 @@ static struct file_operations myops =
 
 static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
-	int i;
 	char buf[PROCFS_MAX_SIZE];
 	int len = 0;
-	unsigned char bytes[4];
 	if (*ppos > 0 || count < PROCFS_MAX_SIZE)
 		return 0;
 	len += sprintf(buf + len, "{\n");
-	len += sprintf(buf + len, "  \"tcp_packets\": %llu,\n", counter.tcp_counter);
 	len += sprintf(buf + len, "  \"tcp_syn_packets\": %llu,\n", counter.tcp_syn_counter);
-	len += sprintf(buf + len, "  \"udp_packets\": %llu,\n", counter.udp_packets_counter);
-	len += sprintf(buf + len, "  \"udp_throughput\": %llu,\n", counter.udp_throughput_counter);
-	len += sprintf(buf + len, "  \"udp_packets_53\": %llu,\n", counter.udp_packets_counter_53);
-	len += sprintf(buf + len, "  \"udp_throughput_53\": %llu,\n", counter.udp_throughput_counter_53);
-	for (i = 0; i < servers_size; i++)
-	{
-		bytes[0] = servers[i].ip & 0xFF;
-		bytes[1] = (servers[i].ip >> 8) & 0xFF;
-		bytes[2] = (servers[i].ip >> 16) & 0xFF;
-		bytes[3] = (servers[i].ip >> 24) & 0xFF;
-		len += sprintf(buf + len, "  \"tcp_packets_%d.%d.%d.%d:%d\": %llu,\n",
-					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].counter);
-		len += sprintf(buf + len, "  \"tcp_syn_packets_%d.%d.%d.%d:%d\": %llu,\n",
-					   bytes[0], bytes[1], bytes[2], bytes[3], ntohs(servers[i].port), servers[i].syn_counter);
-	}
 	len -= 2;
 	len += sprintf(buf + len, "\n}\n");
 	if (copy_to_user(ubuf, buf, len))
@@ -87,13 +54,8 @@ static ssize_t procfile_read(struct file *file, char __user *ubuf, size_t count,
 
 static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t count, loff_t *ppos)
 {
-	int c, num;
-	int servers_counter = 0;
-	int i = 0;
-	unsigned char bytes[4];
+	int c;
 	char buf[PROCFS_MAX_SIZE];
-	char delim[] = "\n";
-	char *token, *cur;
 
 	if (*ppos > 0 || count > PROCFS_MAX_SIZE){
 		printk("Count > PROCFS_MAX_SIZE o pps > 0");
@@ -107,46 +69,6 @@ static ssize_t procfile_write(struct file *file, const char __user *ubuf, size_t
 
 	c = strlen(buf);
 
-	// conto il numero di righe per allocare il vettore degli ip
-	for (i = 0; i < c; i++)
-		if (buf[i] == '\n')
-			servers_counter++;
-
-	// libero il vettore se è già allocato
-	if (servers_size > 0)
-		kfree(servers);
-
-	// alloco il vettore
-	servers = (server_ip_port *)kmalloc(sizeof(server_ip_port) * servers_counter, GFP_KERNEL);
-	if (servers == NULL)
-	{
-		printk("Malloc error");
-		servers_size = 0;
-		// todo: il valore di ritorno ha senso?
-		return -EFAULT;
-	}
-	servers_size = servers_counter;
-
-	// conto il numero di righe per allocare il vettore degli ip
-	i = 0;
-	token = buf;
-	cur = buf;
-	// printk("---- %d - %p", servers_size, buf);
-	while ((token = strsep(&cur, delim)) != NULL)
-	{
-		num = sscanf(token, "%hhd.%hhd.%hhd.%hhd %hd",
-					 &bytes[0], &bytes[1], &bytes[2], &bytes[3], &(servers[i].port));
-		printk("%s %d fine_riga___ %p\n", token, num, token);
-		// printk("num %d", num);
-		if (num == 5){
-			servers[i].port = htons(servers[i].port);
-			servers[i].ip = *(unsigned int *)bytes;
-			servers[i].counter = 0;
-			servers[i].syn_counter = 0;
-		}
-		i++;
-	}
-
 	*ppos = c;
 	return c;
 }
@@ -156,12 +78,7 @@ int __init init_module(void)
 	int result;
 	struct net_device *dev;
 
-	counter.tcp_counter = 0;
 	counter.tcp_syn_counter = 0;
-	counter.udp_packets_counter = 0;
-	counter.udp_packets_counter_53 = 0;
-	counter.udp_throughput_counter = 0;
-	counter.udp_throughput_counter_53 = 0;
 
 	proc_file = proc_create(PROCFS_NAME, 0644, NULL, &myops);
 	if (proc_file == NULL)
@@ -172,7 +89,8 @@ int __init init_module(void)
 	}
 
 	// imposto l'hook per ascoltare il traffico in uscita
-	// sull'interfaccia eth0 (quella verso la wan)
+	// sull'interfaccia interface-vdsl0_835 (quella verso la wan)
+	// eth0 per i test sul tgr
     dev = dev_get_by_name(&init_net, "eth0");
 
     if(!dev)
@@ -204,17 +122,13 @@ void __exit cleanup_module(void)
 {
 	nf_unregister_net_hook(&init_net, &nfho);
 	proc_remove(proc_file);
-	if (servers_size > 0)
-		kfree(servers);
 	printk(KERN_INFO "tcp/udp packet counter: cleanup_module() called\n");
 }
 
 unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
 {
-	int i;
 	struct iphdr *iph;
 	struct tcphdr *tcph;
-	struct udphdr *udph;
 	if (skb)
 	{
 		// todo: non so bene cosa faccia
@@ -229,40 +143,9 @@ unsigned int hook_func(void *priv, struct sk_buff *skb, const struct nf_hook_sta
 				tcph = tcp_hdr(skb);
 				if (!tcph)
 					return NF_ACCEPT;
-				counter.tcp_counter++;
-
 				if (tcph->syn)
 				{
 					counter.tcp_syn_counter++;
-				}
-				for (i = 0; i < servers_size; i++)
-				{
-					if (tcph->dest == servers[i].port && iph->daddr == servers[i].ip)
-					{
-						servers[i].counter++;
-						if (tcph->syn)
-						{
-							servers[i].syn_counter++;
-						}
-						break;
-					}
-				}
-			}
-			// controllo che il protocollo sopra ip sia udp
-			if (iph->protocol == IPPROTO_UDP)
-			{
-				udph = udp_hdr(skb);
-				if (!udph)
-					return NF_ACCEPT;
-				// incremento i contatori generici
-				counter.udp_packets_counter++;
-				counter.udp_throughput_counter += skb->len;
-
-				// verifico che la porta sorgente sia la 53 (DNS)
-				if (ntohs(udph->source) == 53)
-				{
-					counter.udp_packets_counter_53++;
-					counter.udp_throughput_counter_53 += skb->len;
 				}
 			}
 		}
